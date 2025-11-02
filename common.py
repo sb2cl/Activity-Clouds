@@ -1,5 +1,7 @@
 import itertools
 import statistics
+import subprocess
+import re
 
 POSSIBLE_CHARACTERS = ['A', 'C', 'G', 'T', '_']
 RBS_CORE_LENGTH = 6
@@ -127,3 +129,91 @@ def generate_all_sequences(length):
     """
     for combination in itertools.product(POSSIBLE_CHARACTERS, repeat=length):
         yield ''.join(combination)
+
+# Anti-Shine-Dalgarno sequence (16S rRNA E. coli)
+ANTI_SD_SEQ = "ACCUCCUUA"
+
+def extract_number(line):
+    """
+    Extracts a number from a string provided by RNAFold in parenthesis.
+
+    Args:
+        line (str): The string to extract the number from.
+
+    Returns:
+        float: The extracted number, or None if not found.
+    """
+    match = re.search(r'\(\s*([-+]?[0-9]*\.?[0-9]+)\s*\)\s*$', line)
+    return float(match.group(1)) if match else None
+
+def compute_dG_SD_interaction(sd_candidate):
+    """
+    Compute the Gibbs free energy (ΔG) of SD-aSD interaction using RNAcofold.
+
+    Returns:
+        dG (float): The Gibbs free energy (ΔG) of SD-aSD interaction.
+    """
+    input_data = f"{sd_candidate}&{ANTI_SD_SEQ}"
+
+    # Run RNAcofold
+    result = subprocess.run(["RNAcofold", "−−noPS"], input=input_data, text=True, capture_output=True)
+    output = result.stdout.strip().split("\n")
+
+    # Get the numerical value from the parenthesis from the second line
+    if len(output) > 1:
+        dG = extract_number(output[1])
+        return dG
+
+    return None
+
+def find_best_SD(mRNA_seq, search_range=(-14, -5), start_codon="ATG"):
+    """
+    Go through all possible 6-nt sequences in the 5' UTR and select the one with the strongest binding to 16S rRNA.
+
+    Returns:
+        best_sd (str): The best SD sequence.
+        best_spacer (int): The distance from the end of SD to ATG.
+        best_dG (float): The Gibbs free energy (ΔG) of SD-aSD interaction.
+        aug_pos (int): The position of the AUG codon.
+    """
+    # Find the position of the start codon
+    aug_pos = mRNA_seq.rfind(start_codon)
+
+    if aug_pos == -1:
+        return None, None, None  # Start codon not found
+
+    # Trim the sequence to the 5' UTR region (typically -14 to -4 nt from ATG)
+    search_start = max(0, aug_pos + search_range[0])
+    search_end = aug_pos + search_range[1]
+    search_region = mRNA_seq[search_start:search_end]
+
+    best_sd = None
+    best_dG = float("inf")
+    best_spacer = None
+
+    # Go through all possible 6-nt sequences in the given range from right to left
+    for i in range(len(search_region) - 6, -1, -1):
+        candidate_sd = search_region[i: i + 6]
+        dG = compute_dG_SD_interaction(candidate_sd)
+
+        if dG is not None and dG < best_dG:  # Looking for the strongest binding (lowest ΔG)
+            best_sd = candidate_sd
+            best_dG = dG
+            best_spacer = (aug_pos - (search_start + i + 6))  # Distance from the end of SD to ATG
+
+    return best_sd, best_spacer, best_dG, aug_pos
+
+def run_RNAfold(mRNA_seq):
+    """
+    Run RNAfold and get an mRNA structure (dot bracket notation) and Gibbs free energy.
+
+    Returns:
+        structure (str): The mRNA structure.
+        dG (float): The Gibbs free energy.
+    """
+    result = subprocess.run(["RNAfold", "--MEA", "−−noPS"], input=mRNA_seq, text=True, capture_output=True)
+    output = result.stdout.strip().split("\n")
+
+    structure = output[1].split(" ")[0]  # Dot-bracket structure
+    dG = float(output[1].split(" ")[-1].strip("()"))  # Gibbs energy
+    return structure, dG
